@@ -1,0 +1,24 @@
+{
+  "exclude": [
+    "**/node_modules",
+    "**/__pycache__",
+    ".venv",
+    "**/dist",
+    "**/.mypy_cache",
+  ],
+
+  "pythonVersion": "3.14",
+
+  "venv": ".venv",
+  "venvPath": ".",
+
+  "disableBytesTypePromotions": false,
+
+  "typeCheckingMode": "standard",
+
+  // Rules
+  "reportAny": false,
+  "reportMissingTypeStubs": false,
+  "reportUnannotatedClassAttribute": false,
+  "reportUnusedCallResult": false,
+}

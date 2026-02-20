@@ -1,109 +1,90 @@
-# shori-realtime — Phase 1: CDC Infrastructure & Connection Scaffold
+# shori-realtime — Phase 2: CDC Real-Time Dashboard PoC
 
-A PoC that captures CDC events from SQL Server via Debezium Server, routes them through Redpanda, and consumes them in a bare-bones Rust application.
+A PoC that captures CDC events from multiple SQL Server instances via multiple Debezium Server instances, routes them through Redpanda, and serves them to a visually pleasing real-time web dashboard using a Python FastAPI backend and a React/Tremor frontend.
 
 ## Architecture
 
+This PoC showcases a complete end-to-end low-latency pipeline. A workload generator "hammers" 2 distinct SQL Server databases (`ShoriDB_1` and `ShoriDB_3`) with continuous batch inserts. Debezium Server reads these events, routes them to Redpanda, and a FastAPI backend exposes them via Server-Sent Events (SSE) to a live React dashboard.
+
 ```
-SQL Server (CDC) ──► Debezium Server ──► Redpanda ──► Rust Consumer
-     :1433                                :9092           (host)
-                                          :19092
+ShoriSQL_1 (CDC) ──► Debezium 1 ──┐
+  (ShoriDB 1 & 2)                 │
+     :1433                        │
+                                  ▼
+                              Redpanda ──► Python FastAPI Backend ──► React Dashboard
+                                  ▲          (SSE via port 8000)      (Vite port 5173)
+ShoriSQL_2 (CDC) ──► Debezium 2 ──┘           
+  (ShoriDB 3 & 4)
+     :1434
+
+* Workload Generator continuously writes to ShoriDB_1 and ShoriDB_3 via pyodbc
 ```
 
 ## Prerequisites
 
 - Docker & Docker Compose
-- Rust toolchain (cargo, rustc)
-- `cmake` and `libcurl4-openssl-dev` (for building rdkafka — `sudo apt install cmake libcurl4-openssl-dev`)
+- `uv` (Fast Python package and project manager)
+- `Node.js` & `npm` (for the React Dashboard)
 
 ## Quick Start
 
-### 1. Start the infrastructure
+### 1. Start & Initialize the infrastructure
+
+Instead of running Docker Compose manually, use the provided reset script. It tears down old state, brings up the containers, waits for health checks, and initializes all 4 databases with the CDC schema.
 
 ```bash
-docker compose up -d
+./scripts/reset.sh
 ```
 
-Wait for all services to become healthy:
+### 2. Run the FastAPI Backend
+
+In a new terminal, use `uv` to start the backend. This spins up the FastAPI server on port 8000, which includes a background-threaded Redpanda Kafka consumer bridging events to an async Server-Sent Events (SSE) endpoint:
 
 ```bash
-docker compose ps
+uv run main.py
 ```
 
-You should see `sqlserver` and `redpanda` marked as `healthy`. Debezium will start once both dependencies are healthy.
+### 3. Start the React Dashboard
 
-### 2. Initialize the database
-
-Run the init script against SQL Server to create the database, enable CDC, and create the `Users` table:
+In a separate terminal, install the dependencies and start the Vite dev server for the frontend. The dashboard uses Tremor UI and Tailwind CSS for a modern, dark-mode real-time visual representation:
 
 ```bash
-docker exec -i sqlserver /opt/mssql-tools18/bin/sqlcmd \
-  -S localhost -U sa -P 'YourStr0ngP@ssw0rd!' -C \
-  -i /dev/stdin < init.sql
+cd frontend
+npm install
+npm run dev
 ```
 
-### 3. Sanity Check — Insert test data
+Open your browser to `http://localhost:5173`. The dashboard should be live and waiting for data.
 
-Open a `sqlcmd` session to insert some rows:
+### 4. Run the Workload Generator
+
+Finally, in a separate terminal, start the simulated workload generator. This script continuously generates random data batches and inserts them directly into `ShoriDB_1` and `ShoriDB_3` without sleeping, purposefully simulating high-throughput spikes:
 
 ```bash
-docker exec -it sqlserver /opt/mssql-tools18/bin/sqlcmd \
-  -S localhost -U sa -P 'YourStr0ngP@ssw0rd!' -C -d ShoriDB
+uv run generator.py
 ```
 
-Then run:
-
-```sql
-INSERT INTO dbo.Users (name, status) VALUES ('Alice', 'active');
-INSERT INTO dbo.Users (name, status) VALUES ('Bob', 'inactive');
-GO
-
-UPDATE dbo.Users SET status = 'active', updated_at = GETDATE() WHERE name = 'Bob';
-GO
-```
-
-### 4. Verify events in Redpanda
-
-List the topics that Debezium has created:
-
-```bash
-docker exec -it redpanda rpk topic list
-```
-
-You should see `shori_data.ShoriDB.dbo.Users` (and `schema-changes.shori_data`).
-
-Consume messages from the CDC topic:
-
-```bash
-docker exec -it redpanda rpk topic consume shori_data.ShoriDB.dbo.Users
-```
-
-You'll see the raw JSON CDC events printed to your terminal in real-time. Press `Ctrl+C` to stop.
-
-### 5. Run the Rust consumer
-
-In a separate terminal:
-
-```bash
-cargo run
-```
-
-The consumer connects to Redpanda on `localhost:19092`, subscribes to `shori_data.ShoriDB.dbo.Users`, and prints every CDC event (key + payload) to stdout.
-
-Go back to your `sqlcmd` session and insert/update more rows — you'll see them appear in the Rust consumer output in real-time.
+Watch the dashboard light up! You should see live metric cards updating, raw CDC JSON payloads streaming in the terminal view, and the throughput AreaChart displaying the events/sec rate.
 
 ## Project Structure
 
 ```
 .
-├── docker-compose.yml          # SQL Server + Redpanda + Debezium Server
+├── docker-compose.yml          # 2x SQL Server + Redpanda + 2x Debezium Server
 ├── conf/
-│   └── application.properties  # Debezium Server configuration
-├── init.sql                    # Database bootstrap (CDC setup)
-├── src/
-│   └── main.rs                 # Rust consumer entry point
-├── Cargo.toml                  # Rust project manifest
-├── PLAN.md                     # Phase 1 implementation plan
+│   ├── debezium1/application.properties  # Debezium 1 configuration (reduced poll interval)
+│   └── debezium2/application.properties  # Debezium 2 configuration (reduced poll interval)
+├── db/
+│   ├── init_sql1.sql           # Database bootstrap for Instance 1
+│   └── init_sql2.sql           # Database bootstrap for Instance 2
+├── frontend/                   # React + Vite + Tremor + Tailwind dashboard
+│   ├── src/App.tsx             # Main dashboard UI and SSE stream processing
+│   └── tailwind.config.js      # UI styling configuration
+├── scripts/
+│   └── reset.sh                # Helper script to clean, start, and init infrastructure
+├── pyproject.toml              # Python uv project manifest
+├── main.py                     # FastAPI SSE backend & async Kafka consumer
+├── generator.py                # Simulated pyodbc high-throughput workload generator
 └── README.md                   # This file
 ```
 
@@ -111,13 +92,13 @@ Go back to your `sqlcmd` session and insert/update more rows — you'll see them
 
 **Debezium keeps restarting / can't connect to SQL Server:**
 - Ensure SQL Server is fully healthy before Debezium starts (`docker compose ps`).
-- Check Debezium logs: `docker compose logs debezium`.
-- Verify CDC is enabled: connect to SQL Server and run `SELECT is_cdc_enabled FROM sys.databases WHERE name = 'ShoriDB';` — should return `1`.
+- Check Debezium logs: `docker compose logs debezium_1` or `docker compose logs debezium_2`.
+- Verify CDC is enabled: connect to SQL Server and run `SELECT is_cdc_enabled FROM sys.databases WHERE name = 'ShoriDB_1';` — should return `1`.
 
-**Rust consumer doesn't receive messages:**
+**FastAPI / Python backend doesn't receive messages:**
 - Make sure Redpanda port `19092` is exposed and reachable from the host.
 - Verify the topic exists: `docker exec -it redpanda rpk topic list`.
-- Check consumer group lag: `docker exec -it redpanda rpk group describe shori-realtime-consumer`.
+- Check consumer group lag: `docker exec -it redpanda rpk group describe shori-python-consumer`.
 
 **SQL Server Agent not running (CDC won't capture changes):**
-- The `MSSQL_AGENT_ENABLED=true` environment variable must be set in docker-compose. Verify with: `docker exec -it sqlserver /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'YourStr0ngP@ssw0rd!' -C -Q "SELECT status_desc FROM sys.dm_server_services WHERE servicename LIKE '%Agent%'"`.
+- The `MSSQL_AGENT_ENABLED=true` environment variable must be set in docker-compose. Verify with: `docker exec -it shorisql_1 /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'YourStr0ngP@ssw0rd!' -C -Q "SELECT status_desc FROM sys.dm_server_services WHERE servicename LIKE '%Agent%'"`

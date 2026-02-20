@@ -1,9 +1,3 @@
-# Rust build artifacts
-/target/
-
-# Cargo leaves this during build in target; keep lockfile tracked for this app
-**/.cargo-lock
-
 # Environment and local overrides
 .env
 .env.*
@@ -29,3 +23,44 @@ coverage/
 *~
 .DS_Store
 Thumbs.db
+
+.ruff_cache/
+
+# Frontend dependencies and build artifacts
+node_modules/
+dist/
+build/
+.next/
+.nuxt/
+.svelte-kit/
+.angular/
+.parcel-cache/
+.turbo/
+storybook-static/
+
+# Python caches, virtualenvs, and build artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+.venv/
+venv/
+env/
+ENV/
+.mypy_cache/
+.pytest_cache/
+.hypothesis/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+site/
+.eggs/
+*.egg
+*.egg-info/
+pip-wheel-metadata/
+Pipfile.lock
+poetry.lock
+.ipynb_checkpoints/

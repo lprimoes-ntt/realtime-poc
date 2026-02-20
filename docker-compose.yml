@@ -1,13 +1,38 @@
 services:
-  sqlserver:
+  shorisql_1:
     image: mcr.microsoft.com/mssql/server:2022-latest
-    container_name: sqlserver
+    container_name: shorisql_1
     environment:
       ACCEPT_EULA: "Y"
       MSSQL_SA_PASSWORD: "YourStr0ngP@ssw0rd!"
       MSSQL_AGENT_ENABLED: "true"
     ports:
       - "1433:1433"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "/opt/mssql-tools18/bin/sqlcmd",
+          "-S", "localhost",
+          "-U", "sa",
+          "-P", "YourStr0ngP@ssw0rd!",
+          "-C",
+          "-Q", "SELECT 1",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  shorisql_2:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: shorisql_2
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: "YourStr0ngP@ssw0rd!"
+      MSSQL_AGENT_ENABLED: "true"
+    ports:
+      - "1434:1433"
     healthcheck:
       test:
         [
@@ -48,17 +73,30 @@ services:
       retries: 10
       start_period: 15s
 
-  debezium:
+  debezium_1:
     image: quay.io/debezium/server:latest
-    container_name: debezium
+    container_name: debezium_1
     volumes:
-      - ./conf:/debezium/config
-      - debezium-data:/debezium/data
+      - ./conf/debezium1:/debezium/config
+      - debezium1-data:/debezium/data
     depends_on:
-      sqlserver:
+      shorisql_1:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
+
+  debezium_2:
+    image: quay.io/debezium/server:latest
+    container_name: debezium_2
+    volumes:
+      - ./conf/debezium2:/debezium/config
+      - debezium2-data:/debezium/data
+    depends_on:
+      shorisql_2:
         condition: service_healthy
       redpanda:
         condition: service_healthy
 
 volumes:
-  debezium-data:
+  debezium1-data:
+  debezium2-data:

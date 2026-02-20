@@ -1,0 +1,17 @@
+[project]
+name = "realtime-poc"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "confluent-kafka>=2.13.0",
+    "fastapi>=0.129.0",
+    "pyodbc>=5.3.0",
+    "uvicorn>=0.41.0",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.15.2",
+]

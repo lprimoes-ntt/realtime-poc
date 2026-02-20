@@ -1,0 +1,30 @@
+{
+  "file_scan_exclusions": [
+    "**/.git",
+    "**/.svn",
+    "**/.hg",
+    "**/.jj",
+    "**/CVS",
+    "**/.DS_Store",
+    "**/Thumbs.db",
+    "**/.classpath",
+    "**/.setting",
+    "**/__pycache__",
+    "**/node_modules",
+    "**/dist",
+    ".vscode",
+    ".python_packages",
+    ".venv",
+    ".ruff_cache",
+  ],
+  "languages": {
+    "Python": {
+      "format_on_save": "on",
+      "formatter": [
+        { "code_action": "source.fixAll.ruff" },
+        { "code_action": "source.organizeImports.ruff" },
+        { "language_server": { "name": "ruff" } },
+      ],
+    },
+  },
+}
