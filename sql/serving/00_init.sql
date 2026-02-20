@@ -1,5 +1,0 @@
-IF DB_ID('ServingDB') IS NULL
-BEGIN
-  CREATE DATABASE ServingDB;
-END
-GO

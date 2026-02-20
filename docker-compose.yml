@@ -1,64 +1,64 @@
 services:
-  source-db:
+  sqlserver:
     image: mcr.microsoft.com/mssql/server:2022-latest
-    container_name: source-db
+    container_name: sqlserver
     environment:
       ACCEPT_EULA: "Y"
-      MSSQL_SA_PASSWORD: ${SA_PASSWORD}
-      MSSQL_PID: Developer
+      MSSQL_SA_PASSWORD: "YourStr0ngP@ssw0rd!"
       MSSQL_AGENT_ENABLED: "true"
     ports:
-      - "14331:1433"
+      - "1433:1433"
     healthcheck:
-      test: ["CMD-SHELL", "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P \"$${MSSQL_SA_PASSWORD}\" -Q \"SELECT 1\" || exit 1"]
+      test:
+        [
+          "CMD",
+          "/opt/mssql-tools18/bin/sqlcmd",
+          "-S", "localhost",
+          "-U", "sa",
+          "-P", "YourStr0ngP@ssw0rd!",
+          "-C",
+          "-Q", "SELECT 1",
+        ]
       interval: 10s
       timeout: 5s
-      retries: 30
-      start_period: 20s
-    volumes:
-      - source-db-data:/var/opt/mssql
+      retries: 10
+      start_period: 30s
 
-  serving-db:
-    image: mcr.microsoft.com/mssql/server:2022-latest
-    container_name: serving-db
-    environment:
-      ACCEPT_EULA: "Y"
-      MSSQL_SA_PASSWORD: ${SA_PASSWORD}
-      MSSQL_PID: Developer
+  redpanda:
+    image: redpandadata/redpanda:latest
+    container_name: redpanda
+    command:
+      - redpanda
+      - start
+      - --mode
+      - dev-container
+      - --smp
+      - "1"
+      - --kafka-addr
+      - internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr
+      - internal://redpanda:9092,external://localhost:19092
     ports:
-      - "14332:1433"
+      - "9092:9092"
+      - "19092:19092"
     healthcheck:
-      test: ["CMD-SHELL", "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P \"$${MSSQL_SA_PASSWORD}\" -Q \"SELECT 1\" || exit 1"]
+      test: ["CMD", "rpk", "cluster", "health", "--exit-when-healthy"]
       interval: 10s
       timeout: 5s
-      retries: 30
-      start_period: 20s
-    volumes:
-      - serving-db-data:/var/opt/mssql
+      retries: 10
+      start_period: 15s
 
-  pipeline:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: pipeline
+  debezium:
+    image: quay.io/debezium/server:latest
+    container_name: debezium
+    volumes:
+      - ./conf:/debezium/config
+      - debezium-data:/debezium/data
     depends_on:
-      source-db:
+      sqlserver:
         condition: service_healthy
-      serving-db:
+      redpanda:
         condition: service_healthy
-    environment:
-      SA_PASSWORD: ${SA_PASSWORD}
-      SOURCE_DSN: ${SOURCE_DSN}
-      SERVING_DSN: ${SERVING_DSN}
-      POLL_INTERVAL_SECONDS: ${POLL_INTERVAL_SECONDS}
-      CDC_BATCH_MAX_ROWS: ${CDC_BATCH_MAX_ROWS}
-      PROJECTION_INTERVAL_SECONDS: ${PROJECTION_INTERVAL_SECONDS}
-      PROJECTION_RECOMPUTE_WINDOW_MINUTES: ${PROJECTION_RECOMPUTE_WINDOW_MINUTES}
-      ENABLE_PROJ_ORDERS_KPI: ${ENABLE_PROJ_ORDERS_KPI}
-      ENABLE_PROJ_ORDERS_LATEST: ${ENABLE_PROJ_ORDERS_LATEST}
-      LOG_LEVEL: ${LOG_LEVEL}
-    restart: unless-stopped
 
 volumes:
-  source-db-data:
-  serving-db-data:
+  debezium-data:

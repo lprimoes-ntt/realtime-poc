@@ -1,0 +1,12 @@
+prefix=/home/luisetepe/Dev/NTT/PoCs/shori-realtime/target/debug/build/rdkafka-sys-fb9efad56f9f7ade/out
+exec_prefix=${prefix}
+includedir=${prefix}/include
+libdir=${prefix}/lib
+
+Name: librdkafka-static
+Description: The Apache Kafka C/C++ library (static)
+Version: 2.12.1
+Requires.private: 
+Cflags: -I${includedir} -DLIBRDKAFKA_STATICLIB
+Libs: -L${libdir} ${libdir}/librdkafka.a -lpthread -lrt -ldl -lm
+Libs.private: 

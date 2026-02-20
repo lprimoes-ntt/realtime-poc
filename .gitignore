@@ -1,0 +1,31 @@
+# Rust build artifacts
+/target/
+
+# Cargo leaves this during build in target; keep lockfile tracked for this app
+**/.cargo-lock
+
+# Environment and local overrides
+.env
+.env.*
+!.env.example
+*.local
+
+# Runtime outputs
+results.csv
+*.log
+*.pid
+*.tmp
+
+# Coverage/profiling artifacts
+coverage/
+*.profraw
+*.profdata
+
+# Editor and OS files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
