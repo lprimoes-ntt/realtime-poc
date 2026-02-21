@@ -2,13 +2,16 @@ import asyncio
 import json
 import logging
 import threading
-from typing import Any, AsyncGenerator, Dict, Optional
+import time
+from typing import Any, AsyncGenerator, Dict, List, Optional
 
 import uvicorn
 from confluent_kafka import Consumer
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+
+from processor import process_microbatch
 
 # Setup simple logging
 logging.basicConfig(
@@ -116,6 +119,88 @@ def run_kafka_consumer() -> None:
             consumer.close()
 
 
+def run_lakehouse_pipeline() -> None:
+    """Runs a blocking loop that micro-batches CDC events into Delta Lake."""
+    global loop, consumer_thread_running
+
+    conf: dict[str, str | int | float | bool | None] = {
+        "bootstrap.servers": "localhost:19092",
+        "group.id": "shori-lakehouse-pipeline",  # Independent consumer group
+        "auto.offset.reset": "earliest",  # We want to process history for the lakehouse
+        "enable.auto.commit": "false",  # Manual commit after batch processing
+    }
+
+    consumer: Consumer | None = None
+    try:
+        consumer = Consumer(conf)
+        topics = ["^shorisql_.*"]
+        consumer.subscribe(topics)
+        logger.info(f"Lakehouse pipeline started. Subscribed to patterns: {topics}")
+
+        batch: List[Dict[str, Any]] = []
+        last_flush_time = time.time()
+        flush_interval_sec = 2.0
+        max_batch_size = 5000
+
+        while consumer_thread_running:
+            msg = consumer.poll(timeout=0.1)
+
+            if msg is not None:
+                error = msg.error()
+                if error is not None:
+                    if error.name() not in ["_PARTITION_EOF", "UNKNOWN_TOPIC_OR_PART"]:
+                        logger.error(f"Lakehouse Kafka error: {error}")
+                else:
+                    raw_value = msg.value()
+                    if raw_value:
+                        try:
+                            payload_json = json.loads(raw_value.decode("utf-8"))
+                            event_data = {
+                                "topic": msg.topic() or "unknown_topic",
+                                "partition": msg.partition(),
+                                "offset": msg.offset(),
+                                "payload": payload_json,
+                            }
+                            batch.append(event_data)
+                        except json.JSONDecodeError:
+                            pass
+
+            # Check if we should flush the batch
+            now = time.time()
+            if len(batch) >= max_batch_size or (
+                len(batch) > 0 and (now - last_flush_time) >= flush_interval_sec
+            ):
+                logger.info(
+                    f"Processing Lakehouse micro-batch of {len(batch)} events..."
+                )
+
+                # Run the polars/deltalake processor
+                gold_summary = process_microbatch(batch)
+
+                # If we got a summary, send it to the UI
+                if gold_summary and loop and loop.is_running():
+                    lakehouse_event = {"type": "lakehouse_update", "data": gold_summary}
+                    try:
+                        asyncio.run_coroutine_threadsafe(
+                            cdc_events_queue.put(lakehouse_event), loop
+                        )
+                    except asyncio.QueueFull:
+                        logger.warning("Queue full, dropping lakehouse event.")
+
+                # Commit offsets after successful processing
+                consumer.commit(asynchronous=False)
+
+                batch.clear()
+                last_flush_time = time.time()
+
+    except Exception as e:
+        logger.error(f"Lakehouse pipeline crashed: {e}", exc_info=True)
+    finally:
+        logger.info("Closing lakehouse pipeline.")
+        if consumer is not None:
+            consumer.close()
+
+
 @app.on_event("startup")
 async def startup_event() -> None:
     """Start the background consumer thread when FastAPI boots."""
@@ -124,9 +209,14 @@ async def startup_event() -> None:
     consumer_thread_running = True
 
     # Start the Kafka consumer in a daemon thread so it dies when the app dies
-    thread = threading.Thread(target=run_kafka_consumer, daemon=True)
-    thread.start()
-    logger.info("FastAPI startup complete, background consumer launched.")
+    thread1 = threading.Thread(target=run_kafka_consumer, daemon=True)
+    thread1.start()
+
+    # Start the Lakehouse pipeline thread
+    thread2 = threading.Thread(target=run_lakehouse_pipeline, daemon=True)
+    thread2.start()
+
+    logger.info("FastAPI startup complete, background threads launched.")
 
 
 @app.on_event("shutdown")

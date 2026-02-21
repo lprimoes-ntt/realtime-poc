@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState, useRef, useMemo } from "react";
 import {
   Card,
   Grid,
@@ -6,6 +6,7 @@ import {
   Metric,
   Flex,
   AreaChart,
+  BarChart,
   BadgeDelta,
 } from "@tremor/react";
 
@@ -17,6 +18,13 @@ interface CDCEvent {
   payload: any;
 }
 
+interface LakehouseUpdate {
+  type: "lakehouse_update";
+  data: Record<string, Record<string, number>>;
+}
+
+type SSEEvent = CDCEvent | LakehouseUpdate;
+
 interface ChartDataPoint {
   time: string;
   "Events/Sec": number;
@@ -26,10 +34,7 @@ export default function App() {
   const [isConnected, setIsConnected] = useState(false);
   const [totalEvents, setTotalEvents] = useState(0);
   const [currentThroughput, setCurrentThroughput] = useState(0);
-
-  // Keep the last X events for the terminal view
-  const [recentEvents, setRecentEvents] = useState<CDCEvent[]>([]);
-  const maxRecentEvents = 50;
+  const [lakehouseData, setLakehouseData] = useState<Record<string, Record<string, number>>>({});
 
   // Chart data: Events per second over the last 60 seconds
   const [chartData, setChartData] = useState<ChartDataPoint[]>([]);
@@ -52,9 +57,14 @@ export default function App() {
       if (event.data === "ping") return;
 
       try {
-        const data: CDCEvent = JSON.parse(event.data);
-        // Push to buffer instead of processing immediately
-        eventQueue.current.push(data);
+        const data: SSEEvent = JSON.parse(event.data);
+        
+        if ("type" in data && data.type === "lakehouse_update") {
+          setLakehouseData(data.data);
+        } else {
+          // Push to buffer instead of processing immediately
+          eventQueue.current.push(data as CDCEvent);
+        }
       } catch (err) {
         console.error("Failed to parse SSE data", err);
       }
@@ -83,12 +93,6 @@ export default function App() {
 
       setTotalEvents((prev) => prev + chunk.length);
       eventsInCurrentSecond.current += chunk.length;
-
-      setRecentEvents((prev) => {
-        // Reverse chunk so newest events are at the top
-        const newEvents = [...chunk.reverse(), ...prev];
-        return newEvents.slice(0, maxRecentEvents);
-      });
     }, 100);
 
     // --- Throughput Calculation Loop (Runs every 1s) ---
@@ -117,13 +121,34 @@ export default function App() {
     };
   }, [isConnected]);
 
+  // Format Lakehouse data for Tremor BarChart
+  const barChartData = useMemo(() => {
+    // Collect all unique statuses
+    const allStatuses = new Set<string>();
+    Object.values(lakehouseData).forEach((dbData) => {
+      Object.keys(dbData).forEach((status) => allStatuses.add(status));
+    });
+
+    const formattedData = Array.from(allStatuses).map((status) => {
+      const row: any = { status };
+      Object.keys(lakehouseData).forEach((db) => {
+        row[db] = lakehouseData[db][status] || 0;
+      });
+      return row;
+    });
+
+    return formattedData;
+  }, [lakehouseData]);
+
+  const sourceDatabases = Object.keys(lakehouseData);
+
   return (
     <main className="p-4 md:p-10 mx-auto max-w-7xl h-screen">
       <Flex justifyContent="between" alignItems="center" className="mb-8">
         <div>
-          <Metric className="text-white font-bold">Real-time CDC Showcase</Metric>
+          <Metric className="text-white font-bold">Real-time Medallion Architecture</Metric>
           <Text className="text-gray-400">
-            SQL Server ➔ Debezium ➔ Redpanda ➔ FastAPI ➔ React
+            SQL Server ➔ Debezium ➔ Redpanda ➔ Polars ➔ Delta Lake ➔ React
           </Text>
         </div>
         <BadgeDelta
@@ -138,26 +163,49 @@ export default function App() {
       {/* Top Metrics */}
       <Grid numItemsSm={2} numItemsLg={3} className="gap-6 mb-6">
         <Card className="bg-gray-800 border-gray-700 ring-0 shadow-lg">
-          <Text className="text-gray-400">Total Events Processed</Text>
+          <Text className="text-gray-400">Total Raw Events Processed</Text>
           <Metric className="text-white">{totalEvents.toLocaleString()}</Metric>
         </Card>
         <Card className="bg-gray-800 border-gray-700 ring-0 shadow-lg">
-          <Text className="text-gray-400">Current Throughput</Text>
+          <Text className="text-gray-400">Current Ingestion Throughput</Text>
           <Metric className="text-white">
             {currentThroughput}{" "}
             <span className="text-sm font-normal text-gray-500">msg/sec</span>
           </Metric>
         </Card>
         <Card className="bg-gray-800 border-gray-700 ring-0 shadow-lg hidden lg:block">
-          <Text className="text-gray-400">Target Tables</Text>
-          <Metric className="text-white">dbo.test_cdc</Metric>
+          <Text className="text-gray-400">Target Pipeline</Text>
+          <Metric className="text-white">dbo.Tickets ➔ Gold Layer</Metric>
         </Card>
       </Grid>
 
-      {/* Main Chart */}
+      {/* Lakehouse Gold Layer Chart */}
       <Card className="mb-6 bg-gray-800 border-gray-700 ring-0 shadow-lg">
         <Text className="text-gray-400 mb-4">
-          Event Throughput Pulse (Last 60s)
+          Tickets by Status per Database (Gold Layer)
+        </Text>
+        {barChartData.length > 0 ? (
+          <BarChart
+            className="h-72 mt-4"
+            data={barChartData}
+            index="status"
+            categories={sourceDatabases}
+            colors={["blue", "emerald", "amber", "rose", "indigo", "cyan"]}
+            valueFormatter={(number) => Intl.NumberFormat("us").format(number).toString()}
+            stack={true}
+            yAxisWidth={48}
+          />
+        ) : (
+          <div className="h-72 mt-4 flex items-center justify-center text-gray-500">
+            Waiting for Lakehouse pipeline to process first batch...
+          </div>
+        )}
+      </Card>
+
+      {/* Throughput Chart */}
+      <Card className="mb-6 bg-gray-800 border-gray-700 ring-0 shadow-lg">
+        <Text className="text-gray-400 mb-4">
+          Raw Ingestion Pulse (Last 60s)
         </Text>
         <AreaChart
           className="h-72 mt-4"
@@ -171,43 +219,6 @@ export default function App() {
           curveType="monotone"
           animationDuration={300}
         />
-      </Card>
-
-      {/* Terminal View */}
-      <Card className="bg-gray-900 border-gray-700 ring-0 shadow-lg p-0 overflow-hidden flex flex-col h-96">
-        <div className="bg-gray-950 px-4 py-2 border-b border-gray-800 flex items-center gap-2">
-          <div className="w-3 h-3 rounded-full bg-red-500"></div>
-          <div className="w-3 h-3 rounded-full bg-yellow-500"></div>
-          <div className="w-3 h-3 rounded-full bg-green-500"></div>
-          <Text className="ml-2 font-mono text-xs text-gray-500">
-            Raw CDC Feed (Latest 50)
-          </Text>
-        </div>
-        <div className="p-4 overflow-y-auto font-mono text-sm space-y-2">
-          {recentEvents.length === 0 ? (
-            <div className="text-gray-600 animate-pulse">
-              Waiting for events...
-            </div>
-          ) : (
-            recentEvents.map((ev, i) => (
-              <div
-                key={`${ev.topic}-${ev.offset}-${i}`}
-                className="border-b border-gray-800 pb-2 flex"
-              >
-                <span className="text-blue-400 mr-2 flex-shrink-0">
-                  [{ev.topic.split(".")[2] || ev.topic}]
-                </span>
-                <span className="text-emerald-400 mr-2 flex-shrink-0">
-                  p:{ev.partition} o:{ev.offset}
-                </span>
-                <span className="text-gray-300 truncate">
-                  {JSON.stringify(ev.payload).substring(0, 150)}
-                  {JSON.stringify(ev.payload).length > 150 ? "..." : ""}
-                </span>
-              </div>
-            ))
-          )}
-        </div>
       </Card>
     </main>
   );

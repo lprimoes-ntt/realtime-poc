@@ -97,6 +97,28 @@ services:
       redpanda:
         condition: service_healthy
 
+  azurite:
+    image: mcr.microsoft.com/azure-storage/azurite
+    container_name: azurite
+    command: "azurite --skipApiVersionCheck --blobHost 0.0.0.0 --queueHost 0.0.0.0 --tableHost 0.0.0.0"
+    ports:
+      - "10000:10000"
+      - "10001:10001"
+      - "10002:10002"
+
+  azurite-init:
+    image: mcr.microsoft.com/azure-cli
+    container_name: azurite-init
+    depends_on:
+      - azurite
+    command: >
+      bash -c "
+      echo 'Waiting for Azurite...' &&
+      sleep 5 &&
+      az storage container create --name datalake --connection-string 'DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://azurite:10000/devstoreaccount1;' &&
+      echo 'Datalake container created successfully.'
+      "
+
 volumes:
   debezium1-data:
   debezium2-data:

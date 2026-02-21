@@ -1,7 +1,9 @@
 import logging
 import random
 import string
-from typing import List
+import concurrent.futures
+from typing import List, Tuple, Any
+import time
 
 import pyodbc
 
@@ -14,7 +16,7 @@ logger = logging.getLogger(__name__)
 DB1_CONN_STR = (
     "DRIVER={ODBC Driver 18 for SQL Server};"
     "SERVER=localhost,1433;"
-    "DATABASE=ShoriDB_1;"  # Use DB explicitly defined in Debezium config
+    "DATABASE=ShoriDB_1;"
     "UID=sa;"
     "PWD=YourStr0ngP@ssw0rd!;"
     "TrustServerCertificate=yes;"
@@ -23,7 +25,7 @@ DB1_CONN_STR = (
 DB2_CONN_STR = (
     "DRIVER={ODBC Driver 18 for SQL Server};"
     "SERVER=localhost,1434;"
-    "DATABASE=ShoriDB_3;"
+    "DATABASE=ShoriDB_2;"
     "UID=sa;"
     "PWD=YourStr0ngP@ssw0rd!;"
     "TrustServerCertificate=yes;"
@@ -37,48 +39,60 @@ def random_string(length: int = 10) -> str:
 
 
 def setup_database(conn: pyodbc.Connection) -> None:
-    """Ensure the target table exists."""
+    """Ensure the target tables have seed data."""
     cursor = conn.cursor()
-    # Create a simple test table if it doesn't exist
-    cursor.execute(
-        """
-        IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='test_cdc' AND xtype='U')
-        BEGIN
-            CREATE TABLE test_cdc (
-                id INT IDENTITY(1,1) PRIMARY KEY,
-                data_payload VARCHAR(255) NOT NULL,
-                created_at DATETIME DEFAULT GETDATE()
-            )
+    
+    # Check if we have seed users
+    cursor.execute("SELECT COUNT(*) FROM dbo.Users")
+    user_count = cursor.fetchone()[0]
+    
+    if user_count == 0:
+        logger.info("Inserting seed data (Customers, Users, Projects)...")
+        # Seed Customers
+        cursor.execute("INSERT INTO dbo.Customers (name, industry) VALUES ('Acme Corp', 'Technology')")
+        cursor.execute("INSERT INTO dbo.Customers (name, industry) VALUES ('Global Tech', 'Finance')")
+        
+        # Seed Users
+        cursor.execute("INSERT INTO dbo.Users (full_name, email, role) VALUES ('Alice Admin', 'alice@test.com', 'Admin')")
+        cursor.execute("INSERT INTO dbo.Users (full_name, email, role) VALUES ('Bob Builder', 'bob@test.com', 'Developer')")
+        cursor.execute("INSERT INTO dbo.Users (full_name, email, role) VALUES ('Charlie Check', 'charlie@test.com', 'Tester')")
+        
+        # Seed Projects
+        cursor.execute("INSERT INTO dbo.Projects (customer_id, name, project_key) VALUES (1, 'Acme Alpha', 'ACM')")
+        cursor.execute("INSERT INTO dbo.Projects (customer_id, name, project_key) VALUES (2, 'Global Beta', 'GLB')")
+        
+        conn.commit()
 
-            -- Attempt to enable CDC on the table since it's newly created
-            EXEC sys.sp_cdc_enable_table
-                @source_schema = N'dbo',
-                @source_name = N'test_cdc',
-                @role_name = NULL;
-        END
-        """
-    )
-    # Enable CDC on the table if it's not already enabled (Requires DB to have CDC enabled)
-    # Note: For Debezium to work, the Database itself must have CDC enabled:
-    # EXEC sys.sp_cdc_enable_db;
-    # EXEC sys.sp_cdc_enable_table @source_schema = N'dbo', @source_name = N'test_cdc', @role_name = NULL;
-
-    conn.commit()
     cursor.close()
 
 
 def insert_batch(conn: pyodbc.Connection, batch_size: int = 50) -> None:
-    """Insert a batch of rows quickly."""
+    """Insert a batch of Tickets quickly."""
     cursor = conn.cursor()
-    query = "INSERT INTO test_cdc (data_payload) VALUES (?)"
+    query = """
+        INSERT INTO dbo.Tickets (project_id, reporter_id, assignee_id, title, description, status, priority) 
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    """
 
-    # Generate batch data
-    data: List[tuple[str]] = [(random_string(20),) for _ in range(batch_size)]
+    statuses = ['Open', 'In Progress', 'Resolved', 'Closed']
+    priorities = ['Low', 'Medium', 'High', 'Critical']
+    
+    data: List[Tuple[Any, ...]] = []
+    for _ in range(batch_size):
+        project_id = random.randint(1, 2)
+        reporter_id = random.randint(1, 3)
+        assignee_id = random.randint(1, 3)
+        title = f"Task {random_string(8)}"
+        description = f"Description for {title}"
+        status = random.choice(statuses)
+        priority = random.choice(priorities)
+        
+        data.append((project_id, reporter_id, assignee_id, title, description, status, priority))
 
     try:
         cursor.executemany(query, data)
         conn.commit()
-        logger.info(f"Successfully inserted batch of {batch_size} rows.")
+        logger.info(f"Successfully inserted batch of {batch_size} tickets.")
     except Exception as e:
         logger.error(f"Failed to insert batch: {e}")
         conn.rollback()
@@ -109,13 +123,25 @@ def run_workload_generator() -> None:
     logger.info("Databases connected and initialized. Starting workload loop...")
 
     try:
-        while True:
-            # Hammering both databases without sleeping
-            batch_size = random.randint(5000, 10000)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            while True:
+                # Hammering both databases with slightly smaller batches so we don't overwhelm SSE/UI
+                # as we're doing complex operations now
+                batch_size = random.randint(50, 500)
 
-            logger.info(f"Hammering BOTH databases with {batch_size} rows each!")
-            insert_batch(conn1, batch_size)
-            insert_batch(conn2, batch_size)
+                logger.info(
+                    f"Hammering BOTH databases with {batch_size} rows each in parallel!"
+                )
+
+                # Submit both batches to run concurrently
+                f1 = executor.submit(insert_batch, conn1, batch_size)
+                f2 = executor.submit(insert_batch, conn2, batch_size)
+
+                # Wait for both batch inserts to complete before moving to the next iteration
+                concurrent.futures.wait([f1, f2])
+                
+                # Sleep briefly to not completely murder the local disk and CPU
+                time.sleep(1)
 
     except KeyboardInterrupt:
         logger.info("Workload generator stopped by user.")
