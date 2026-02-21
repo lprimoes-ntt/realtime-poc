@@ -1,143 +1,356 @@
-import { useEffect, useState, useRef, useMemo } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  Card,
-  Grid,
-  Text,
-  Metric,
-  Flex,
   AreaChart,
-  BarChart,
   BadgeDelta,
+  Card,
+  Flex,
+  Grid,
+  Metric,
+  Text,
+  BarChart,
 } from "@tremor/react";
 
-interface CDCEvent {
+interface CDCEventPayload {
   topic: string;
   partition: number;
   offset: number;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  payload: any;
+  payload: Record<string, unknown>;
 }
 
-interface LakehouseUpdate {
+interface LakehousePayload {
+  summary: Record<string, Record<string, number>>;
+  processed: number;
+  failed: number;
+  gold_recomputed: boolean;
+}
+
+interface PipelineErrorPayload {
+  message: string;
+  fatal: boolean;
+}
+
+interface BaseSSEEvent {
+  ts: string;
+}
+
+interface CDCStatsPayload {
+  events_in_interval: number;
+  interval_sec: number;
+  events_per_sec: number;
+  total_received: number;
+  total_dropped: number;
+}
+
+interface CDCStatsEvent extends BaseSSEEvent {
+  type: "cdc_stats";
+  data: CDCStatsPayload;
+}
+
+interface CDCEvent extends BaseSSEEvent {
+  type: "cdc_raw";
+  data: CDCEventPayload;
+}
+
+interface LakehouseUpdateEvent extends BaseSSEEvent {
   type: "lakehouse_update";
-  data: Record<string, Record<string, number>>;
+  data: LakehousePayload;
 }
 
-type SSEEvent = CDCEvent | LakehouseUpdate;
+interface PipelineErrorEvent extends BaseSSEEvent {
+  type: "pipeline_error";
+  data: PipelineErrorPayload;
+}
+
+interface HeartbeatEvent extends BaseSSEEvent {
+  type: "heartbeat";
+  data: Record<string, never>;
+}
+
+type SSEEvent = CDCEvent | LakehouseUpdateEvent | PipelineErrorEvent | HeartbeatEvent;
+type ParsedSSEEvent = SSEEvent | CDCStatsEvent;
 
 interface ChartDataPoint {
   time: string;
   "Events/Sec": number;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function parseEvent(raw: string): ParsedSSEEvent | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+
+  if (!isRecord(parsed)) {
+    return null;
+  }
+
+  const type = parsed.type;
+  const ts = parsed.ts;
+  const data = parsed.data;
+
+  if (typeof type !== "string" || typeof ts !== "string" || !isRecord(data)) {
+    return null;
+  }
+
+  if (type === "heartbeat") {
+    return { type, ts, data: {} };
+  }
+
+  if (type === "pipeline_error") {
+    const message = typeof data.message === "string" ? data.message : "Unknown pipeline error";
+    const fatal = data.fatal === true;
+    return {
+      type,
+      ts,
+      data: { message, fatal },
+    };
+  }
+
+  if (type === "lakehouse_update") {
+    const summary = isRecord(data.summary) ? (data.summary as Record<string, Record<string, number>>) : {};
+    const processed = typeof data.processed === "number" ? data.processed : 0;
+    const failed = typeof data.failed === "number" ? data.failed : 0;
+    const goldRecomputed = data.gold_recomputed === true;
+
+    return {
+      type,
+      ts,
+      data: {
+        summary,
+        processed,
+        failed,
+        gold_recomputed: goldRecomputed,
+      },
+    };
+  }
+
+  if (type === "cdc_raw") {
+    if (typeof data.topic !== "string" || typeof data.partition !== "number" || typeof data.offset !== "number") {
+      return null;
+    }
+
+    return {
+      type,
+      ts,
+      data: {
+        topic: data.topic,
+        partition: data.partition,
+        offset: data.offset,
+        payload: isRecord(data.payload) ? data.payload : {},
+      },
+    };
+  }
+
+  if (type === "cdc_stats") {
+    const eventsInInterval = typeof data.events_in_interval === "number" ? data.events_in_interval : 0;
+    const intervalSec = typeof data.interval_sec === "number" ? data.interval_sec : 0;
+    const eventsPerSec = typeof data.events_per_sec === "number" ? data.events_per_sec : 0;
+    const totalReceived = typeof data.total_received === "number" ? data.total_received : 0;
+    const totalDropped = typeof data.total_dropped === "number" ? data.total_dropped : 0;
+
+    return {
+      type,
+      ts,
+      data: {
+        events_in_interval: eventsInInterval,
+        interval_sec: intervalSec,
+        events_per_sec: eventsPerSec,
+        total_received: totalReceived,
+        total_dropped: totalDropped,
+      },
+    };
+  }
+
+  return null;
+}
+
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000";
+const MAX_LOCAL_QUEUE = Number(import.meta.env.VITE_MAX_LOCAL_EVENT_QUEUE ?? "5000");
+const BASE_RECONNECT_DELAY_MS = 1000;
+const MAX_RECONNECT_DELAY_MS = 15000;
+
 export default function App() {
   const [isConnected, setIsConnected] = useState(false);
   const [totalEvents, setTotalEvents] = useState(0);
   const [currentThroughput, setCurrentThroughput] = useState(0);
+  const [droppedEvents, setDroppedEvents] = useState(0);
+  const [pipelineError, setPipelineError] = useState<string | null>(null);
   const [lakehouseData, setLakehouseData] = useState<Record<string, Record<string, number>>>({});
-
-  // Chart data: Events per second over the last 60 seconds
   const [chartData, setChartData] = useState<ChartDataPoint[]>([]);
 
-  // Refs for tracking throughput and smoothing
   const eventsInCurrentSecond = useRef(0);
   const eventQueue = useRef<CDCEvent[]>([]);
+  const hasStatsFeed = useRef(false);
+  const reconnectAttempt = useRef(0);
+  const reconnectTimeoutId = useRef<number | null>(null);
+  const eventSourceRef = useRef<EventSource | null>(null);
 
   useEffect(() => {
-    // Connect to FastAPI SSE
-    const eventSource = new EventSource("http://localhost:8000/api/stream");
+    let isActive = true;
 
-    eventSource.onopen = () => {
-      console.log("Connected to SSE");
-      setIsConnected(true);
-    };
-
-    eventSource.onmessage = (event) => {
-      // Ignore ping heartbeats
-      if (event.data === "ping") return;
-
-      try {
-        const data: SSEEvent = JSON.parse(event.data);
-        
-        if ("type" in data && data.type === "lakehouse_update") {
-          setLakehouseData(data.data);
-        } else {
-          // Push to buffer instead of processing immediately
-          eventQueue.current.push(data as CDCEvent);
-        }
-      } catch (err) {
-        console.error("Failed to parse SSE data", err);
+    const connect = () => {
+      if (!isActive) {
+        return;
       }
+
+      const eventSource = new EventSource(`${API_BASE_URL}/api/stream`);
+      eventSourceRef.current = eventSource;
+
+      eventSource.onopen = () => {
+        reconnectAttempt.current = 0;
+        setIsConnected(true);
+      };
+
+      eventSource.onmessage = (event) => {
+        const parsed = parseEvent(event.data);
+        if (!parsed) {
+          return;
+        }
+
+        if (parsed.type === "heartbeat") {
+          return;
+        }
+
+        if (parsed.type === "pipeline_error") {
+          setPipelineError(parsed.data.message);
+          return;
+        }
+
+        if (parsed.type === "lakehouse_update") {
+          setPipelineError(null);
+          setLakehouseData(parsed.data.summary);
+          return;
+        }
+
+        if (parsed.type === "cdc_stats") {
+          hasStatsFeed.current = true;
+          const timestamp = new Date(parsed.ts);
+          const timeLabel = timestamp.toLocaleTimeString([], { hour12: false });
+
+          setTotalEvents(parsed.data.total_received);
+          setCurrentThroughput(parsed.data.events_per_sec);
+          setDroppedEvents(parsed.data.total_dropped);
+          setChartData((previous) => {
+            const next = [...previous, { time: timeLabel, "Events/Sec": parsed.data.events_per_sec }];
+            if (next.length > 60) {
+              next.shift();
+            }
+            return next;
+          });
+          return;
+        }
+
+        const queue = eventQueue.current;
+        if (queue.length >= MAX_LOCAL_QUEUE) {
+          queue.shift();
+          setDroppedEvents((previous) => previous + 1);
+        }
+        queue.push(parsed);
+      };
+
+      eventSource.onerror = () => {
+        setIsConnected(false);
+        eventSource.close();
+
+        if (eventSourceRef.current === eventSource) {
+          eventSourceRef.current = null;
+        }
+
+        if (reconnectTimeoutId.current !== null) {
+          window.clearTimeout(reconnectTimeoutId.current);
+        }
+
+        const attempt = reconnectAttempt.current;
+        const delay = Math.min(
+          BASE_RECONNECT_DELAY_MS * Math.pow(2, attempt),
+          MAX_RECONNECT_DELAY_MS,
+        );
+        reconnectAttempt.current += 1;
+
+        reconnectTimeoutId.current = window.setTimeout(() => {
+          if (isActive) {
+            connect();
+          }
+        }, delay);
+      };
     };
 
-    eventSource.onerror = (err) => {
-      console.error("SSE Error", err);
-      setIsConnected(false);
-      eventSource.close();
-
-      // Try to reconnect after 3 seconds
-      setTimeout(() => {
-        setIsConnected(true); // Forces re-render to trigger useEffect again
-      }, 3000);
-    };
-
-    // --- Fast Processing Loop (Runs every 100ms) to drain the queue smoothly ---
-    const processingIntervalId = setInterval(() => {
+    const processingIntervalId = window.setInterval(() => {
+      if (hasStatsFeed.current) {
+        return;
+      }
       const queue = eventQueue.current;
-      if (queue.length === 0) return;
+      if (queue.length === 0) {
+        return;
+      }
 
-      // Take a chunk out of the queue (e.g. 10% of the queue, or at least 1)
-      // This spreads massive bursts (e.g. 9000 events) across the whole second
       const chunkSize = Math.max(1, Math.ceil(queue.length / 10));
       const chunk = queue.splice(0, chunkSize);
 
-      setTotalEvents((prev) => prev + chunk.length);
+      setTotalEvents((previous) => previous + chunk.length);
       eventsInCurrentSecond.current += chunk.length;
     }, 100);
 
-    // --- Throughput Calculation Loop (Runs every 1s) ---
-    const intervalId = setInterval(() => {
+    const throughputIntervalId = window.setInterval(() => {
+      if (hasStatsFeed.current) {
+        return;
+      }
       const now = new Date();
-      const timeStr = now.toLocaleTimeString([], { hour12: false });
+      const timeLabel = now.toLocaleTimeString([], { hour12: false });
 
-      const rawEventsThisSec = eventsInCurrentSecond.current;
-      eventsInCurrentSecond.current = 0; // Reset for next second
+      const eventsThisSecond = eventsInCurrentSecond.current;
+      eventsInCurrentSecond.current = 0;
 
-      setCurrentThroughput(rawEventsThisSec);
-
-      setChartData((prev) => {
-        const newData = [...prev, { time: timeStr, "Events/Sec": rawEventsThisSec }];
-        
-        // Keep last 60 seconds of data points
-        if (newData.length > 60) newData.shift();
-        return newData;
+      setCurrentThroughput(eventsThisSecond);
+      setChartData((previous) => {
+        const next = [...previous, { time: timeLabel, "Events/Sec": eventsThisSecond }];
+        if (next.length > 60) {
+          next.shift();
+        }
+        return next;
       });
     }, 1000);
 
-    return () => {
-      eventSource.close();
-      clearInterval(intervalId);
-      clearInterval(processingIntervalId);
-    };
-  }, [isConnected]);
+    connect();
 
-  // Format Lakehouse data for Tremor BarChart
+    return () => {
+      isActive = false;
+
+      if (reconnectTimeoutId.current !== null) {
+        window.clearTimeout(reconnectTimeoutId.current);
+      }
+
+      if (eventSourceRef.current) {
+        eventSourceRef.current.close();
+      }
+
+      window.clearInterval(processingIntervalId);
+      window.clearInterval(throughputIntervalId);
+    };
+  }, []);
+
   const barChartData = useMemo(() => {
-    // Collect all unique statuses
     const allStatuses = new Set<string>();
     Object.values(lakehouseData).forEach((dbData) => {
       Object.keys(dbData).forEach((status) => allStatuses.add(status));
     });
 
-    const formattedData = Array.from(allStatuses).map((status) => {
-      const row: any = { status };
-      Object.keys(lakehouseData).forEach((db) => {
-        row[db] = lakehouseData[db][status] || 0;
+    const rows: Array<Record<string, string | number>> = [];
+    allStatuses.forEach((status) => {
+      const row: Record<string, string | number> = { status };
+      Object.keys(lakehouseData).forEach((dbName) => {
+        row[dbName] = lakehouseData[dbName][status] ?? 0;
       });
-      return row;
+      rows.push(row);
     });
 
-    return formattedData;
+    return rows;
   }, [lakehouseData]);
 
   const sourceDatabases = Object.keys(lakehouseData);
@@ -148,7 +361,7 @@ export default function App() {
         <div>
           <Metric className="text-white font-bold">Real-time Medallion Architecture</Metric>
           <Text className="text-gray-400">
-            SQL Server ➔ Debezium ➔ Redpanda ➔ Polars ➔ Delta Lake ➔ React
+            SQL Server - Debezium - Redpanda - Polars - Delta Lake - React
           </Text>
         </div>
         <BadgeDelta
@@ -160,30 +373,39 @@ export default function App() {
         </BadgeDelta>
       </Flex>
 
-      {/* Top Metrics */}
-      <Grid numItemsSm={2} numItemsLg={3} className="gap-6 mb-6">
-        <Card className="bg-gray-800 border-gray-700 ring-0 shadow-lg">
-          <Text className="text-gray-400">Total Raw Events Processed</Text>
-          <Metric className="text-white">{totalEvents.toLocaleString()}</Metric>
+      {pipelineError && (
+        <Card className="mb-6 bg-rose-900/40 border-rose-700 ring-0 shadow-lg">
+          <Text className="text-rose-200">Pipeline Error</Text>
+          <Metric className="text-rose-100 text-base mt-2">{pipelineError}</Metric>
         </Card>
+      )}
+
+      <Grid numItemsSm={2} numItemsLg={4} className="gap-6 mb-6">
+        <Card className="bg-gray-800 border-gray-700 ring-0 shadow-lg">
+          <Text className="text-gray-400">Total Raw Events Received</Text>
+          <Metric className="text-white">{totalEvents.toLocaleString("en-US")}</Metric>
+        </Card>
+
         <Card className="bg-gray-800 border-gray-700 ring-0 shadow-lg">
           <Text className="text-gray-400">Current Ingestion Throughput</Text>
           <Metric className="text-white">
-            {currentThroughput}{" "}
-            <span className="text-sm font-normal text-gray-500">msg/sec</span>
+            {currentThroughput} <span className="text-sm font-normal text-gray-500">msg/sec</span>
           </Metric>
         </Card>
+
+        <Card className="bg-gray-800 border-gray-700 ring-0 shadow-lg">
+          <Text className="text-gray-400">Dropped Events (Server SSE)</Text>
+          <Metric className="text-white">{droppedEvents.toLocaleString("en-US")}</Metric>
+        </Card>
+
         <Card className="bg-gray-800 border-gray-700 ring-0 shadow-lg hidden lg:block">
           <Text className="text-gray-400">Target Pipeline</Text>
-          <Metric className="text-white">dbo.Tickets ➔ Gold Layer</Metric>
+          <Metric className="text-white">dbo.Tickets - Gold Layer</Metric>
         </Card>
       </Grid>
 
-      {/* Lakehouse Gold Layer Chart */}
       <Card className="mb-6 bg-gray-800 border-gray-700 ring-0 shadow-lg">
-        <Text className="text-gray-400 mb-4">
-          Tickets by Status per Database (Gold Layer)
-        </Text>
+        <Text className="text-gray-400 mb-4">Tickets by Status per Database (Gold Layer)</Text>
         {barChartData.length > 0 ? (
           <BarChart
             className="h-72 mt-4"
@@ -191,7 +413,7 @@ export default function App() {
             index="status"
             categories={sourceDatabases}
             colors={["blue", "emerald", "amber", "rose", "indigo", "cyan"]}
-            valueFormatter={(number) => Intl.NumberFormat("us").format(number).toString()}
+            valueFormatter={(value) => Intl.NumberFormat("en-US").format(Number(value))}
             stack={true}
             yAxisWidth={48}
           />
@@ -202,11 +424,8 @@ export default function App() {
         )}
       </Card>
 
-      {/* Throughput Chart */}
       <Card className="mb-6 bg-gray-800 border-gray-700 ring-0 shadow-lg">
-        <Text className="text-gray-400 mb-4">
-          Raw Ingestion Pulse (Last 60s)
-        </Text>
+        <Text className="text-gray-400 mb-4">Raw Ingestion Pulse (Last 60s)</Text>
         <AreaChart
           className="h-72 mt-4"
           data={chartData}

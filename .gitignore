@@ -9,6 +9,7 @@ results.csv
 *.log
 *.pid
 *.tmp
+data/datalake/
 
 # Coverage/profiling artifacts
 coverage/

@@ -1,58 +1,64 @@
-# shori-realtime — Phase 2: CDC Real-Time Dashboard PoC
+# shori-realtime — CDC -> Kafka -> Medallion -> React PoC
 
-A PoC that captures CDC events from multiple SQL Server instances via multiple Debezium Server instances, routes them through Redpanda, and serves them to a visually pleasing real-time web dashboard using a Python FastAPI backend and a React/Tremor frontend.
+A local PoC that captures SQL Server CDC events with Debezium, streams through Redpanda, builds Bronze/Silver/Gold Delta tables with Polars, and serves a real-time dashboard through FastAPI SSE + React.
 
-## Architecture & Recent Changes
+## What This PoC Guarantees
 
-This PoC showcases a complete end-to-end low-latency pipeline combined with a real-time Medallion Architecture Lakehouse:
-- **Workload Generator**: Parallelized via `concurrent.futures` to hammer `ShoriDB_1` and `ShoriDB_2` simultaneously with simulated ticket data.
-- **CDC Pipeline**: Debezium Server reads these events, routing them to Redpanda.
-- **Medallion Lakehouse**: A background thread in the FastAPI backend buffers Kafka messages into micro-batches, processing them via `polars` and `deltalake`.
-  - **Bronze**: Appends raw JSON payloads.
-  - **Silver**: Cleans and strictly upserts (merges) the tickets.
-  - **Gold**: Aggregates ticket status counts per source database.
-  *(Note: Currently, the Delta tables are written to the local `data/datalake/` directory rather than the Azurite emulator due to `deltalake` Python library compatibility with the local emulator.)*
-- **Real-Time UI**: The FastAPI backend exposes the Gold layer aggregations via Server-Sent Events (SSE) to a live React dashboard, rendering a live Tremor `BarChart` of Tickets by Status per Database.
+- Kafka offsets are committed **only after** successful micro-batch processing.
+- Fatal Lakehouse errors are emitted as `pipeline_error` SSE events and the Lakehouse worker stops.
+- SSE delivery is broadcast to multiple clients with per-client queues and overflow handling.
+- Runtime metrics are exposed via `/api/health`.
+- Debezium scope is restricted to `Tickets` table for this PoC.
+
+## Architecture
 
 ```text
-ShoriSQL_1 (CDC) ──► Debezium 1 ──┐
-  (ShoriDB_1)                     │
-     :1433                        │
-                                  ▼
-                              Redpanda ──► Python FastAPI Backend ──► React Dashboard
-                                  ▲        (Micro-batch Lakehouse)    (Vite port 5173)
-ShoriSQL_2 (CDC) ──► Debezium 2 ──┘        (SSE via port 8000)
-  (ShoriDB_2)
-     :1434
+ShoriSQL_1 (CDC) -> Debezium_1 --\
+                                ---> Redpanda -> FastAPI backend -> React dashboard
+ShoriSQL_2 (CDC) -> Debezium_2 --/                   |            
+                                                      -> Delta Bronze/Silver/Gold
 ```
 
 ## Prerequisites
 
-- Docker & Docker Compose
-- `uv` (Fast Python package and project manager)
-- `Node.js` & `npm` (for the React Dashboard)
+- Docker + Docker Compose
+- `uv`
+- Node.js + npm
+
+## Configuration
+
+Environment defaults are documented in `.env.example`.
+
+Key variables:
+- `SQLSERVER_SA_PASSWORD`
+- `KAFKA_BOOTSTRAP_SERVERS`
+- `KAFKA_UNASSIGNED_RESTART_SEC`
+- `KAFKA_CONSUMER_RESTART_BACKOFF_SEC`
+- `LAKEHOUSE_FLUSH_INTERVAL_SEC`
+- `LAKEHOUSE_MAX_BATCH_SIZE`
+- `GOLD_REFRESH_INTERVAL_SEC`
+- `SSE_CLIENT_QUEUE_SIZE`
+- `SSE_CLIENT_OVERFLOW_LIMIT`
+- `SSE_EMIT_CDC_RAW`
+- `SSE_CDC_STATS_INTERVAL_SEC`
+- `CORS_ALLOW_ORIGINS`
+- `VITE_API_BASE_URL`
 
 ## Quick Start
 
-### 1. Start & Initialize the infrastructure
-
-Instead of running Docker Compose manually, use the provided setup script. It tears down old state, brings up the containers, waits for health checks, and initializes the databases with the CDC schema.
+### 1) Infrastructure + DB bootstrap
 
 ```bash
 ./scripts/setup.sh
 ```
 
-### 2. Run the FastAPI Backend
-
-In a new terminal, use `uv` to start the backend. This spins up the FastAPI server on port 8000 using the standard runner. The backend includes background threads for Kafka consumption and Lakehouse micro-batching.
+### 2) Backend
 
 ```bash
-uv run fastapi dev main.py
+uv run main.py
 ```
 
-### 3. Start the React Dashboard
-
-In a separate terminal, install the dependencies and start the Vite dev server for the frontend. The dashboard uses Tremor UI and Tailwind CSS for a modern, dark-mode real-time visual representation:
+### 3) Frontend
 
 ```bash
 cd frontend
@@ -60,52 +66,72 @@ npm install --legacy-peer-deps
 npm run dev
 ```
 
-Open your browser to `http://localhost:5173`. The dashboard should be live and waiting for data.
+Open `http://localhost:5173`.
 
-### 4. Run the Workload Generator
-
-Finally, in a separate terminal, start the simulated workload generator. This script continuously generates random data batches and inserts them concurrently into `ShoriDB_1` and `ShoriDB_2` without sleeping, purposefully simulating high-throughput spikes:
+### 4) Workload generator
 
 ```bash
 uv run generator.py
 ```
 
-Watch the dashboard light up! You should see live metric cards updating and the BarChart displaying the real-time aggregated Medallion Gold metrics.
+## API
 
-## Project Structure
+### `GET /api/stream`
+SSE stream with a stable envelope:
 
-```text
-.
-├── docker-compose.yml          # 2x SQL Server + Redpanda + 2x Debezium Server (+ Azurite)
-├── conf/
-│   ├── debezium1/application.properties
-│   └── debezium2/application.properties
-├── data/datalake/              # Local storage for Bronze, Silver, and Gold Delta tables
-├── db/
-│   ├── init_sql1.sql           # Database bootstrap for Instance 1
-│   └── init_sql2.sql           # Database bootstrap for Instance 2
-├── frontend/                   # React + Vite + Tremor + Tailwind dashboard
-│   ├── src/App.tsx             # Main dashboard UI and SSE stream processing
-│   └── tailwind.config.js      # UI styling configuration
-├── scripts/
-│   └── setup.sh                # Helper script to clean, start, and init infrastructure
-├── pyproject.toml              # Python uv project manifest
-├── main.py                     # FastAPI SSE backend, async Kafka consumer & Lakehouse loop
-├── processor.py                # Core Polars & Delta Lake (Medallion) logic
-├── generator.py                # Concurrent pyodbc high-throughput workload generator
-└── README.md                   # This file
+```json
+{
+  "type": "cdc_stats | cdc_raw | lakehouse_update | pipeline_error | heartbeat",
+  "ts": "2026-02-21T20:00:00.000000+00:00",
+  "data": {}
+}
 ```
+
+Event payloads:
+- `cdc_stats`: `{ events_in_interval, interval_sec, events_per_sec, total_received, total_dropped }`
+- `cdc_raw`: `{ topic, partition, offset, payload }`
+- `lakehouse_update`: `{ summary, processed, failed, gold_recomputed }`
+- `pipeline_error`: `{ message, fatal }`
+- `heartbeat`: `{}`
+
+### `GET /api/health`
+Returns:
+- thread status (`ui_consumer_alive`, `lakehouse_alive`, `lakehouse_running`)
+- client count
+- counters (`events_received`, `events_dropped`, `batches_ok`, `batches_failed`, `last_batch_at`, `last_error`)
+- active runtime knobs
+
+## Backpressure Behavior
+
+- Backend fan-out uses per-client bounded queues.
+- On queue overflow, oldest messages are dropped for that client.
+- Clients that overflow repeatedly are disconnected.
+- Dropped counts are reflected in `/api/health` (`events_dropped`).
+- For high-throughput runs, keep `SSE_EMIT_CDC_RAW=false` and rely on `cdc_stats` for UI counters.
+
+## Repository Hygiene
+
+`data/datalake/` is intentionally ignored in git. Delta artifacts are runtime data, not source code.
 
 ## Troubleshooting
 
-**Debezium keeps restarting / can't connect to SQL Server:**
-- Ensure SQL Server is fully healthy before Debezium starts (`docker compose ps`).
-- Check Debezium logs: `docker compose logs debezium_1` or `docker compose logs debezium_2`.
-- Verify CDC is enabled: connect to SQL Server and run `SELECT is_cdc_enabled FROM sys.databases WHERE name = 'ShoriDB_1';` — should return `1`.
+**No events in UI:**
+- Check backend health: `curl http://localhost:8000/api/health`
+- Verify Redpanda topics: `docker exec -it redpanda rpk topic list`
 
-**FastAPI / Python backend doesn't receive messages:**
-- Make sure Redpanda port `19092` is exposed and reachable from the host.
-- Verify the topic exists: `docker exec -it redpanda rpk topic list`.
+**Debezium not streaming:**
+- `docker compose logs debezium_1`
+- `docker compose logs debezium_2`
+- Verify SQL Server services are healthy and CDC is enabled.
 
-**SQL Server Agent not running (CDC won't capture changes):**
-- The `MSSQL_AGENT_ENABLED=true` environment variable must be set in docker-compose. Verify with: `docker exec -it shorisql_1 /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'YourStr0ngP@ssw0rd!' -C -Q "SELECT status_desc FROM sys.dm_server_services WHERE servicename LIKE '%Agent%'"`
+**Pipeline halted:**
+- Inspect `last_error` in `/api/health`
+- Look for `pipeline_error` in browser console or UI banner
+
+**SQL Server Agent status check:**
+
+```bash
+docker exec -it shorisql_1 /opt/mssql-tools18/bin/sqlcmd \
+  -S localhost -U sa -P "$SQLSERVER_SA_PASSWORD" -C \
+  -Q "SELECT status_desc FROM sys.dm_server_services WHERE servicename LIKE '%Agent%'"
+```

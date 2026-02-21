@@ -1,9 +1,10 @@
+import concurrent.futures
 import logging
+import os
 import random
 import string
-import concurrent.futures
-from typing import List, Tuple, Any
 import time
+from typing import Any, List, Tuple
 
 import pyodbc
 
@@ -12,22 +13,31 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+SQLSERVER_SA_PASSWORD = os.getenv("SQLSERVER_SA_PASSWORD", "YourStr0ngP@ssw0rd!")
+SQLSERVER_ODBC_DRIVER = os.getenv(
+    "SQLSERVER_ODBC_DRIVER", "ODBC Driver 18 for SQL Server"
+)
+DB1_HOST = os.getenv("DB1_HOST", "localhost")
+DB2_HOST = os.getenv("DB2_HOST", "localhost")
+DB1_PORT = os.getenv("DB1_PORT", "1433")
+DB2_PORT = os.getenv("DB2_PORT", "1434")
+
 # Connection strings for the two databases based on docker-compose.yml
 DB1_CONN_STR = (
-    "DRIVER={ODBC Driver 18 for SQL Server};"
-    "SERVER=localhost,1433;"
+    f"DRIVER={{{SQLSERVER_ODBC_DRIVER}}};"
+    f"SERVER={DB1_HOST},{DB1_PORT};"
     "DATABASE=ShoriDB_1;"
     "UID=sa;"
-    "PWD=YourStr0ngP@ssw0rd!;"
+    f"PWD={SQLSERVER_SA_PASSWORD};"
     "TrustServerCertificate=yes;"
 )
 
 DB2_CONN_STR = (
-    "DRIVER={ODBC Driver 18 for SQL Server};"
-    "SERVER=localhost,1434;"
+    f"DRIVER={{{SQLSERVER_ODBC_DRIVER}}};"
+    f"SERVER={DB2_HOST},{DB2_PORT};"
     "DATABASE=ShoriDB_2;"
     "UID=sa;"
-    "PWD=YourStr0ngP@ssw0rd!;"
+    f"PWD={SQLSERVER_SA_PASSWORD};"
     "TrustServerCertificate=yes;"
 )
 
@@ -41,26 +51,40 @@ def random_string(length: int = 10) -> str:
 def setup_database(conn: pyodbc.Connection) -> None:
     """Ensure the target tables have seed data."""
     cursor = conn.cursor()
-    
+
     # Check if we have seed users
     cursor.execute("SELECT COUNT(*) FROM dbo.Users")
     user_count = cursor.fetchone()[0]
-    
+
     if user_count == 0:
         logger.info("Inserting seed data (Customers, Users, Projects)...")
         # Seed Customers
-        cursor.execute("INSERT INTO dbo.Customers (name, industry) VALUES ('Acme Corp', 'Technology')")
-        cursor.execute("INSERT INTO dbo.Customers (name, industry) VALUES ('Global Tech', 'Finance')")
-        
+        cursor.execute(
+            "INSERT INTO dbo.Customers (name, industry) VALUES ('Acme Corp', 'Technology')"
+        )
+        cursor.execute(
+            "INSERT INTO dbo.Customers (name, industry) VALUES ('Global Tech', 'Finance')"
+        )
+
         # Seed Users
-        cursor.execute("INSERT INTO dbo.Users (full_name, email, role) VALUES ('Alice Admin', 'alice@test.com', 'Admin')")
-        cursor.execute("INSERT INTO dbo.Users (full_name, email, role) VALUES ('Bob Builder', 'bob@test.com', 'Developer')")
-        cursor.execute("INSERT INTO dbo.Users (full_name, email, role) VALUES ('Charlie Check', 'charlie@test.com', 'Tester')")
-        
+        cursor.execute(
+            "INSERT INTO dbo.Users (full_name, email, role) VALUES ('Alice Admin', 'alice@test.com', 'Admin')"
+        )
+        cursor.execute(
+            "INSERT INTO dbo.Users (full_name, email, role) VALUES ('Bob Builder', 'bob@test.com', 'Developer')"
+        )
+        cursor.execute(
+            "INSERT INTO dbo.Users (full_name, email, role) VALUES ('Charlie Check', 'charlie@test.com', 'Tester')"
+        )
+
         # Seed Projects
-        cursor.execute("INSERT INTO dbo.Projects (customer_id, name, project_key) VALUES (1, 'Acme Alpha', 'ACM')")
-        cursor.execute("INSERT INTO dbo.Projects (customer_id, name, project_key) VALUES (2, 'Global Beta', 'GLB')")
-        
+        cursor.execute(
+            "INSERT INTO dbo.Projects (customer_id, name, project_key) VALUES (1, 'Acme Alpha', 'ACM')"
+        )
+        cursor.execute(
+            "INSERT INTO dbo.Projects (customer_id, name, project_key) VALUES (2, 'Global Beta', 'GLB')"
+        )
+
         conn.commit()
 
     cursor.close()
@@ -70,13 +94,13 @@ def insert_batch(conn: pyodbc.Connection, batch_size: int = 50) -> None:
     """Insert a batch of Tickets quickly."""
     cursor = conn.cursor()
     query = """
-        INSERT INTO dbo.Tickets (project_id, reporter_id, assignee_id, title, description, status, priority) 
+        INSERT INTO dbo.Tickets (project_id, reporter_id, assignee_id, title, description, status, priority)
         VALUES (?, ?, ?, ?, ?, ?, ?)
     """
 
-    statuses = ['Open', 'In Progress', 'Resolved', 'Closed']
-    priorities = ['Low', 'Medium', 'High', 'Critical']
-    
+    statuses = ["Open", "In Progress", "Resolved", "Closed"]
+    priorities = ["Low", "Medium", "High", "Critical"]
+
     data: List[Tuple[Any, ...]] = []
     for _ in range(batch_size):
         project_id = random.randint(1, 2)
@@ -86,8 +110,10 @@ def insert_batch(conn: pyodbc.Connection, batch_size: int = 50) -> None:
         description = f"Description for {title}"
         status = random.choice(statuses)
         priority = random.choice(priorities)
-        
-        data.append((project_id, reporter_id, assignee_id, title, description, status, priority))
+
+        data.append(
+            (project_id, reporter_id, assignee_id, title, description, status, priority)
+        )
 
     try:
         cursor.executemany(query, data)
@@ -127,7 +153,7 @@ def run_workload_generator() -> None:
             while True:
                 # Hammering both databases with slightly smaller batches so we don't overwhelm SSE/UI
                 # as we're doing complex operations now
-                batch_size = random.randint(50, 500)
+                batch_size = random.randint(5000, 10000)
 
                 logger.info(
                     f"Hammering BOTH databases with {batch_size} rows each in parallel!"
@@ -139,7 +165,7 @@ def run_workload_generator() -> None:
 
                 # Wait for both batch inserts to complete before moving to the next iteration
                 concurrent.futures.wait([f1, f2])
-                
+
                 # Sleep briefly to not completely murder the local disk and CPU
                 time.sleep(1)
 

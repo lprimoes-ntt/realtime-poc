@@ -4,7 +4,7 @@ services:
     container_name: shorisql_1
     environment:
       ACCEPT_EULA: "Y"
-      MSSQL_SA_PASSWORD: "YourStr0ngP@ssw0rd!"
+      MSSQL_SA_PASSWORD: "${SQLSERVER_SA_PASSWORD:-YourStr0ngP@ssw0rd!}"
       MSSQL_AGENT_ENABLED: "true"
     ports:
       - "1433:1433"
@@ -15,7 +15,7 @@ services:
           "/opt/mssql-tools18/bin/sqlcmd",
           "-S", "localhost",
           "-U", "sa",
-          "-P", "YourStr0ngP@ssw0rd!",
+          "-P", "${SQLSERVER_SA_PASSWORD:-YourStr0ngP@ssw0rd!}",
           "-C",
           "-Q", "SELECT 1",
         ]
@@ -29,7 +29,7 @@ services:
     container_name: shorisql_2
     environment:
       ACCEPT_EULA: "Y"
-      MSSQL_SA_PASSWORD: "YourStr0ngP@ssw0rd!"
+      MSSQL_SA_PASSWORD: "${SQLSERVER_SA_PASSWORD:-YourStr0ngP@ssw0rd!}"
       MSSQL_AGENT_ENABLED: "true"
     ports:
       - "1434:1433"
@@ -40,7 +40,7 @@ services:
           "/opt/mssql-tools18/bin/sqlcmd",
           "-S", "localhost",
           "-U", "sa",
-          "-P", "YourStr0ngP@ssw0rd!",
+          "-P", "${SQLSERVER_SA_PASSWORD:-YourStr0ngP@ssw0rd!}",
           "-C",
           "-Q", "SELECT 1",
         ]
@@ -76,6 +76,8 @@ services:
   debezium_1:
     image: quay.io/debezium/server:latest
     container_name: debezium_1
+    environment:
+      SQLSERVER_SA_PASSWORD: "${SQLSERVER_SA_PASSWORD:-YourStr0ngP@ssw0rd!}"
     volumes:
       - ./conf/debezium1:/debezium/config
       - debezium1-data:/debezium/data
@@ -88,6 +90,8 @@ services:
   debezium_2:
     image: quay.io/debezium/server:latest
     container_name: debezium_2
+    environment:
+      SQLSERVER_SA_PASSWORD: "${SQLSERVER_SA_PASSWORD:-YourStr0ngP@ssw0rd!}"
     volumes:
       - ./conf/debezium2:/debezium/config
       - debezium2-data:/debezium/data

@@ -4,6 +4,8 @@ set -euo pipefail
 # Ensure we run from the project root regardless of where script is called
 cd "$(dirname "$0")/.."
 
+SQLSERVER_SA_PASSWORD="${SQLSERVER_SA_PASSWORD:-YourStr0ngP@ssw0rd!}"
+
 echo "=== Resetting shori-realtime to clean slate ==="
 
 # 1. Stop and remove all containers + anonymous volumes
@@ -48,12 +50,12 @@ echo "Redpanda is healthy."
 echo ""
 echo "Initializing ShoriDB_1 on ShoriSQL_1 (CDC + tables)..."
 docker exec -i shorisql_1 /opt/mssql-tools18/bin/sqlcmd \
-    -S localhost -U sa -P 'YourStr0ngP@ssw0rd!' -C \
+    -S localhost -U sa -P "${SQLSERVER_SA_PASSWORD}" -C \
     -i /dev/stdin < db/init_sql1.sql
 
 echo "Initializing ShoriDB_2 on ShoriSQL_2 (CDC + tables)..."
 docker exec -i shorisql_2 /opt/mssql-tools18/bin/sqlcmd \
-    -S localhost -U sa -P 'YourStr0ngP@ssw0rd!' -C \
+    -S localhost -U sa -P "${SQLSERVER_SA_PASSWORD}" -C \
     -i /dev/stdin < db/init_sql2.sql
 
 echo ""
